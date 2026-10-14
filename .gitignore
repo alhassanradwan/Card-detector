@@ -14,6 +14,8 @@ yolo/dataset/
 yolo/runs/
 /runs/
 *.pt
+yolo/export/
+calibration_image_sample_data_*.npy
 
 # ===== Flutter =====
 # Miscellaneous

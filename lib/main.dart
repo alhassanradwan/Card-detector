@@ -1,11 +1,18 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import 'detection/card_detector.dart';
+import 'detection/card_overlay.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Card detection maps camera frames to the screen assuming portrait.
+  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(const CardDetectorApp());
 }
 
@@ -37,12 +44,56 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   Object? _cameraError;
   bool _isInitializing = true;
   int _initializationGeneration = 0;
+  CardDetector? _detector;
+  CardDetection? _detection;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initializeCamera();
+    _loadDetector();
+  }
+
+  Future<void> _loadDetector() async {
+    try {
+      final detector = await CardDetector.create();
+      if (!mounted) {
+        detector.dispose();
+        return;
+      }
+      _detector = detector;
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Card detection is unavailable: $error')),
+      );
+    }
+  }
+
+  /// Streams camera frames to the card detector. Frames that arrive while the
+  /// previous one is still being processed are skipped.
+  Future<void> _startDetection(CameraController controller) async {
+    if (!controller.value.isInitialized || controller.value.isStreamingImages) {
+      return;
+    }
+    await controller.startImageStream((image) => _processFrame(controller, image));
+  }
+
+  Future<void> _processFrame(CameraController controller, CameraImage image) async {
+    final detector = _detector;
+    if (detector == null || detector.isBusy) return;
+    try {
+      final detection = await detector.detect(
+        image,
+        rotationDegrees: controller.description.sensorOrientation,
+      );
+      if (!mounted || _controller != controller || _capturedImage != null) return;
+      if (detection == null && _detection == null) return;
+      setState(() => _detection = detection);
+    } catch (error) {
+      debugPrint('Card detection failed: $error');
+    }
   }
 
   Future<void> _initializeCamera() async {
@@ -67,6 +118,10 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         camera,
         ResolutionPreset.high,
         enableAudio: false,
+        // The formats the card detector reads.
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.yuv420
+            : ImageFormatGroup.bgra8888,
       );
       initializingController = controller;
       await controller.initialize();
@@ -80,6 +135,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
         _controller = controller;
         _isInitializing = false;
       });
+      await _startDetection(controller);
     } catch (error) {
       if (initializingController != null) {
         unawaited(initializingController.dispose());
@@ -100,6 +156,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
       setState(() {
         _controller = null;
         _capturedImage = null;
+        _detection = null;
         _isInitializing = false;
       });
       unawaited(controller.dispose());
@@ -113,16 +170,28 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     if (controller == null || !controller.value.isInitialized) return;
 
     try {
+      // Taking a photo while frames are streaming fails on some phones.
+      if (controller.value.isStreamingImages) await controller.stopImageStream();
       final image = await controller.takePicture();
       final bytes = await image.readAsBytes();
       if (!mounted) return;
-      setState(() => _capturedImage = bytes);
+      setState(() {
+        _capturedImage = bytes;
+        _detection = null;
+      });
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Could not capture image: $error')),
       );
+      unawaited(_startDetection(controller));
     }
+  }
+
+  void _retake() {
+    setState(() => _capturedImage = null);
+    final controller = _controller;
+    if (controller != null) unawaited(_startDetection(controller));
   }
 
   @override
@@ -130,6 +199,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     final controller = _controller;
     if (controller != null) unawaited(controller.dispose());
+    _detector?.dispose();
     super.dispose();
   }
 
@@ -148,7 +218,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                 child: capturedImage != null
                     ? Image.memory(capturedImage, fit: BoxFit.contain)
                     : controller != null && controller.value.isInitialized
-                    ? _CameraGuide(controller: controller)
+                    ? _CameraGuide(controller: controller, detection: _detection)
                     : _cameraContent(),
               ),
             ),
@@ -156,7 +226,7 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
               padding: const EdgeInsets.all(16),
               child: capturedImage != null
                   ? OutlinedButton.icon(
-                      onPressed: () => setState(() => _capturedImage = null),
+                      onPressed: _retake,
                       icon: const Icon(Icons.refresh),
                       label: const Text('Retake'),
                     )
@@ -209,11 +279,12 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
 }
 
 class _CameraGuide extends StatelessWidget {
-  const _CameraGuide({required this.controller});
+  const _CameraGuide({required this.controller, required this.detection});
 
   static const double _cardAspectRatio = 85.6 / 54;
 
   final CameraController controller;
+  final CardDetection? detection;
 
   @override
   Widget build(BuildContext context) {
@@ -235,17 +306,22 @@ class _CameraGuide extends StatelessWidget {
         return Stack(
           fit: StackFit.expand,
           children: [
-            CameraPreview(controller),
+            // The outline is the preview's child so it covers exactly the
+            // camera image, which the card corners are measured against.
+            CameraPreview(
+              controller,
+              child: CustomPaint(painter: CardOverlayPainter(detection)),
+            ),
             CustomPaint(painter: _CameraGuidePainter(frameRect)),
             Positioned(
               top: frameRect.bottom + 14,
               left: 16,
               right: 16,
-              child: const Text(
-                'put the card inside the frame',
+              child: Text(
+                detection != null ? 'Card detected' : 'put the card inside the frame',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  color: Colors.white,
+                  color: detection != null ? const Color(0xFF00E676) : Colors.white,
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                   shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
