@@ -9,6 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
+# YOLO dataset (contains real card photos) and training output
+yolo/dataset/
+yolo/runs/
+/runs/
+*.pt
+
 # ===== Flutter =====
 # Miscellaneous
 *.class

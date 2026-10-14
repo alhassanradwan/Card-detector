@@ -7,5 +7,17 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.4.6",
     "opencv-python>=5.0.0.93",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
     "ultralytics>=8.4.175",
 ]
+
+# PyTorch with NVIDIA GPU support (CUDA 12.6, matches the installed driver 560.78)
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
