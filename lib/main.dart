@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io' show Platform;
-import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -218,7 +217,10 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
                 child: capturedImage != null
                     ? Image.memory(capturedImage, fit: BoxFit.contain)
                     : controller != null && controller.value.isInitialized
-                    ? _CameraGuide(controller: controller, detection: _detection)
+                    ? _CameraPreviewLayer(
+                        controller: controller,
+                        detection: _detection,
+                      )
                     : _cameraContent(),
               ),
             ),
@@ -278,89 +280,41 @@ class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
   }
 }
 
-class _CameraGuide extends StatelessWidget {
-  const _CameraGuide({required this.controller, required this.detection});
-
-  static const double _cardAspectRatio = 85.6 / 54;
+class _CameraPreviewLayer extends StatelessWidget {
+  const _CameraPreviewLayer({
+    required this.controller,
+    required this.detection,
+  });
 
   final CameraController controller;
   final CardDetection? detection;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final frameWidth = math.min(
-          constraints.maxWidth * 0.88,
-          math.max(0, constraints.maxHeight - 96) * _cardAspectRatio,
-        );
-        final frameHeight = frameWidth / _cardAspectRatio;
-        final frameTop = (constraints.maxHeight - frameHeight - 64) / 2;
-        final frameRect = Rect.fromLTWH(
-          (constraints.maxWidth - frameWidth) / 2,
-          frameTop,
-          frameWidth,
-          frameHeight,
-        );
-
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            // The outline is the preview's child so it covers exactly the
-            // camera image, which the card corners are measured against.
-            CameraPreview(
-              controller,
-              child: CustomPaint(painter: CardOverlayPainter(detection)),
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Keep the detection outline aligned with the camera image.
+        CameraPreview(
+          controller,
+          child: CustomPaint(painter: CardOverlayPainter(detection)),
+        ),
+        Positioned(
+          bottom: 24,
+          left: 16,
+          right: 16,
+          child: Text(
+            detection != null ? 'Card detected' : 'Position the card in view',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: detection != null ? const Color(0xFF00E676) : Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
             ),
-            CustomPaint(painter: _CameraGuidePainter(frameRect)),
-            Positioned(
-              top: frameRect.bottom + 14,
-              left: 16,
-              right: 16,
-              child: Text(
-                detection != null ? 'Card detected' : 'put the card inside the frame',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: detection != null ? const Color(0xFF00E676) : Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+          ),
+        ),
+      ],
     );
   }
-}
-
-class _CameraGuidePainter extends CustomPainter {
-  const _CameraGuidePainter(this.frameRect);
-
-  final Rect frameRect;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final frame = RRect.fromRectAndRadius(frameRect, const Radius.circular(12));
-    final mask = Path()
-      ..fillType = PathFillType.evenOdd
-      ..addRect(Offset.zero & size)
-      ..addRRect(frame);
-    canvas.drawPath(
-      mask,
-      Paint()..color = Colors.grey.shade300.withValues(alpha: 0.62),
-    );
-    canvas.drawRRect(
-      frame,
-      Paint()
-        ..color = Colors.white
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 3,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_CameraGuidePainter oldDelegate) =>
-      oldDelegate.frameRect != frameRect;
 }
