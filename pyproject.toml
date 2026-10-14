@@ -1,7 +1,7 @@
 [project]
 name = "card-detector"
 version = "0.1.0"
-description = "Add your description here"
+description = "Python card-detection prototype using OpenCV and Ultralytics."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
