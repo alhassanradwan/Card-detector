@@ -1,122 +1,290 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:typed_data';
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const CardDetectorApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class CardDetectorApp extends StatelessWidget {
+  const CardDetectorApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Card Detector',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const CameraPage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class CameraPage extends StatefulWidget {
+  const CameraPage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<CameraPage> createState() => _CameraPageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _CameraPageState extends State<CameraPage> with WidgetsBindingObserver {
+  CameraController? _controller;
+  Uint8List? _capturedImage;
+  Object? _cameraError;
+  bool _isInitializing = true;
+  int _initializationGeneration = 0;
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeCamera();
+  }
+
+  Future<void> _initializeCamera() async {
+    final generation = ++_initializationGeneration;
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isInitializing = true;
+      _cameraError = null;
     });
+
+    CameraController? initializingController;
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        throw CameraException('NoCameraAvailable', 'No cameras were found.');
+      }
+
+      final camera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      final controller = CameraController(
+        camera,
+        ResolutionPreset.high,
+        enableAudio: false,
+      );
+      initializingController = controller;
+      await controller.initialize();
+
+      if (!mounted || generation != _initializationGeneration) {
+        unawaited(controller.dispose());
+        return;
+      }
+
+      setState(() {
+        _controller = controller;
+        _isInitializing = false;
+      });
+    } catch (error) {
+      if (initializingController != null) {
+        unawaited(initializingController.dispose());
+      }
+      if (!mounted || generation != _initializationGeneration) return;
+      setState(() {
+        _cameraError = error;
+        _isInitializing = false;
+      });
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _controller;
+    if (state == AppLifecycleState.inactive && controller != null) {
+      ++_initializationGeneration;
+      setState(() {
+        _controller = null;
+        _capturedImage = null;
+        _isInitializing = false;
+      });
+      unawaited(controller.dispose());
+    } else if (state == AppLifecycleState.resumed && controller == null) {
+      _initializeCamera();
+    }
+  }
+
+  Future<void> _captureImage() async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    try {
+      final image = await controller.takePicture();
+      final bytes = await image.readAsBytes();
+      if (!mounted) return;
+      setState(() => _capturedImage = bytes);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not capture image: $error')),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    final controller = _controller;
+    if (controller != null) unawaited(controller.dispose());
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    final controller = _controller;
+    final capturedImage = _capturedImage;
+
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      appBar: AppBar(title: const Text('Card Detector')),
+      body: SafeArea(
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Expanded(
+              child: Center(
+                child: capturedImage != null
+                    ? Image.memory(capturedImage, fit: BoxFit.contain)
+                    : controller != null && controller.value.isInitialized
+                    ? _CameraGuide(controller: controller)
+                    : _cameraContent(),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: capturedImage != null
+                  ? OutlinedButton.icon(
+                      onPressed: () => setState(() => _capturedImage = null),
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('Retake'),
+                    )
+                  : controller != null && controller.value.isInitialized
+                  ? FilledButton.icon(
+                      onPressed: _captureImage,
+                      icon: const Icon(Icons.camera_alt),
+                      label: const Text('Capture'),
+                    )
+                  : const SizedBox(height: 48),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ),
     );
   }
+
+  Widget _cameraContent() {
+    if (_isInitializing) {
+      return const CircularProgressIndicator();
+    }
+
+    final error = _cameraError;
+    if (error != null) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.no_photography, size: 48),
+            const SizedBox(height: 16),
+            const Text(
+              'Unable to start the camera. Check camera access and try again.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text('$error', textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _initializeCamera,
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return const SizedBox.shrink();
+  }
+}
+
+class _CameraGuide extends StatelessWidget {
+  const _CameraGuide({required this.controller});
+
+  static const double _cardAspectRatio = 85.6 / 54;
+
+  final CameraController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final frameWidth = math.min(
+          constraints.maxWidth * 0.88,
+          math.max(0, constraints.maxHeight - 96) * _cardAspectRatio,
+        );
+        final frameHeight = frameWidth / _cardAspectRatio;
+        final frameTop = (constraints.maxHeight - frameHeight - 64) / 2;
+        final frameRect = Rect.fromLTWH(
+          (constraints.maxWidth - frameWidth) / 2,
+          frameTop,
+          frameWidth,
+          frameHeight,
+        );
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            CameraPreview(controller),
+            CustomPaint(painter: _CameraGuidePainter(frameRect)),
+            Positioned(
+              top: frameRect.bottom + 14,
+              left: 16,
+              right: 16,
+              child: const Text(
+                'put the card inside the frame',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  shadows: [Shadow(color: Colors.black54, blurRadius: 4)],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _CameraGuidePainter extends CustomPainter {
+  const _CameraGuidePainter(this.frameRect);
+
+  final Rect frameRect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final frame = RRect.fromRectAndRadius(frameRect, const Radius.circular(12));
+    final mask = Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(Offset.zero & size)
+      ..addRRect(frame);
+    canvas.drawPath(
+      mask,
+      Paint()..color = Colors.grey.shade300.withValues(alpha: 0.62),
+    );
+    canvas.drawRRect(
+      frame,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CameraGuidePainter oldDelegate) =>
+      oldDelegate.frameRect != frameRect;
 }
