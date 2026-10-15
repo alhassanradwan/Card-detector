@@ -60,7 +60,7 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # Card segmentation model (exported from yolo/runs/card_seg_55 by yolo/export_tflite.py)
+  # Card segmentation model (exported from yolo/runs/card_seg_fakes by yolo/export_tflite.py)
   assets:
     - assets/models/
 

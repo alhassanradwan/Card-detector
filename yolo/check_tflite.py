@@ -35,7 +35,7 @@ from ai_edge_litert.interpreter import Interpreter
 from ultralytics import YOLO
 
 ROOT = Path(__file__).parent.parent
-PT_MODEL = ROOT / "yolo" / "runs" / "card_seg_55" / "weights" / "best.pt"
+PT_MODEL = ROOT / "yolo" / "runs" / "card_seg_fakes" / "weights" / "best.pt"
 TFLITE_MODEL = ROOT / "assets" / "models" / "card_seg.tflite"
 VAL_IMAGES = ROOT / "yolo" / "dataset" / "images" / "val"
 SIZE = 640
@@ -79,6 +79,10 @@ def main() -> None:
         tflite_mask = cv2.resize(((mask * crop) > 0.5).astype(np.uint8), (SIZE, SIZE), interpolation=cv2.INTER_NEAREST)
 
         result = pt.predict(image, imgsz=SIZE, verbose=False, conf=0.01)[0]
+        if result.boxes is None or result.masks is None or len(result.boxes) == 0:
+            # No-card photo: best.pt finds nothing, the .tflite model should score low too
+            print(f"{image_path.name[:45]:<45} score tflite {det[4, best]:.3f} / pt nothing found (no card)")
+            continue
         pt_score = float(result.boxes.conf[0])
         pt_mask_small = (result.masks.data[0].cpu().numpy() > 0.5).astype(np.uint8)
         pt_mask_full = cv2.resize(pt_mask_small, (w, h), interpolation=cv2.INTER_NEAREST)

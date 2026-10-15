@@ -31,7 +31,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 YOLO_DIR = Path(__file__).parent
-MODEL = YOLO_DIR / "runs" / "card_seg_55" / "weights" / "best.pt"
+MODEL = YOLO_DIR / "runs" / "card_seg_fakes" / "weights" / "best.pt"
 IMAGE_SIZE = 640  # must match the size the app feeds to the model
 OUTPUT_DIR = YOLO_DIR / "export"
 

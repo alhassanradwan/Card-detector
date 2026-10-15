@@ -304,7 +304,9 @@ class _CameraPreviewLayer extends StatelessWidget {
           left: 16,
           right: 16,
           child: Text(
-            detection != null ? 'Card detected' : 'Position the card in view',
+            detection != null
+                ? 'Card detected (${(detection!.confidence * 100).round()}% sure)'
+                : 'Position the card in view',
             textAlign: TextAlign.center,
             style: TextStyle(
               color: detection != null ? const Color(0xFF00E676) : Colors.white,

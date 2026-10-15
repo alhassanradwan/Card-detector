@@ -190,7 +190,7 @@ class _CardModel {
   static const _maskCoefficients = 32;
   static const _detectionValues = 4 + 1 + _maskCoefficients; // box, score, mask coefficients
 
-  static const _minConfidence = 0.5; // ignore guesses the model is less than 50% sure about
+  static const _minConfidence = 0.74; // ignore guesses the model is less than 74% sure about
   static const _duplicateOverlap = 0.5; // boxes overlapping more than this are the same object
   static const _maxObjectsChecked = 5; // distinct objects checked for a card shape
   static const _minCardArea = 0.02; // card must cover at least 2% of the frame
