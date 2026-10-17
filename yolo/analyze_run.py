@@ -8,7 +8,9 @@ Runs automatically at the end of train.py. Covers:
     4. confidence cut-off  the range that separates real cards from fakes
     5. comparison          against the previous run
     6. chart               the score of every epoch, drawn with text
-    7. suggestions         what to try next
+    7. prediction time     time per photo on this PC and the average over all photos
+    8. runtime             training, predicting and analysis times, and the software running the model
+    9. suggestions         what to try next
 
 Mistakes and the comparison use only photos the model never trained on:
     real cards        the real validation photos
@@ -25,10 +27,14 @@ import csv
 import re
 import shutil
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import NamedTuple, TypeVar, cast
 
 import cv2
+import torch
+import ultralytics
 from ultralytics import YOLO
 from ultralytics.engine.results import Results
 
@@ -36,7 +42,9 @@ from build_dataset import DATASET_DIR, MAX_NO_CARD_PHOTOS, NO_CARD_FOLDERS
 from make_fake_cards import OUTPUT_DIR as FAKES_DIR
 
 RUNS_DIR = Path(__file__).parent / "runs"
-APP_DETECTOR = Path(__file__).parent.parent / "lib" / "detection" / "card_detector.dart"
+PROJECT_DIR = Path(__file__).parent.parent
+APP_DETECTOR = PROJECT_DIR / "lib" / "detection" / "card_detector.dart"
+APP_MODEL = PROJECT_DIR / "assets" / "models" / "card_seg.tflite"
 MEANINGFUL_GAIN = 0.005  # a score gain smaller than this is treated as noise
 OVERFIT_RISE = 0.15  # validation outline error this far above its lowest point = overfitting
 
@@ -168,17 +176,42 @@ def show_training_length(epochs: list[dict[str, float]]) -> list[str]:
     return advice
 
 
-def show_mistakes(run_dir: Path, model: YOLO) -> tuple[dict[str, int], list[float], list[float], list[str]]:
+class Timing(NamedTuple):
+    """How long one prediction took, in milliseconds."""
+
+    group: str
+    photo: str
+    prepare: float  # resize and convert the photo
+    model: float  # the model itself
+    outline: float  # turn the model output into boxes and outlines
+
+    @property
+    def total(self) -> float:
+        return self.prepare + self.model + self.outline
+
+
+def show_mistakes(
+    run_dir: Path, model: YOLO
+) -> tuple[dict[str, int], list[float], list[float], list[str], list[Timing]]:
     heading(f"3. MISTAKES (photos it never trained on, cut-off {CONFIDENCE:.0%})")
     mistakes_dir = run_dir / "mistakes"
     shutil.rmtree(mistakes_dir, ignore_errors=True)
     mistakes_dir.mkdir()
 
+    groups = test_groups()
+    first_photo = next(photo for photos in groups.values() for photo in photos)
+    for _ in range(3):  # warm-up: the first predictions are slow while the model loads
+        detect(model, first_photo)
+
     counts = {"cards": 0, "missed": 0, "fake outlined": 0, "no-card photos": 0, "false alarms": 0}
     card_scores, fake_scores, missed_names = [], [], []
-    for group, photos in test_groups().items():
+    timings: list[Timing] = []
+    for group, photos in groups.items():
         for photo in photos:
             result = detect(model, photo)
+            speed = result.speed
+            timings.append(Timing(group, photo.name, speed["preprocess"] or 0.0,
+                                  speed["inference"] or 0.0, speed["postprocess"] or 0.0))
             found = scores(result)
             top = found[0] if found else 0.0
             problem = None
@@ -213,7 +246,7 @@ def show_mistakes(run_dir: Path, model: YOLO) -> tuple[dict[str, int], list[floa
     print(f"  False alarms ................ {counts['false alarms']}/{counts['no-card photos']} no-card photos")
     if counts["missed"] or counts["fake outlined"] or counts["false alarms"]:
         print(f"  Photos with the model's guesses drawn on: {mistakes_dir}")
-    return counts, card_scores, fake_scores, missed_names
+    return counts, card_scores, fake_scores, missed_names, timings
 
 
 def show_cutoff(card_scores: list[float], fake_scores: list[float]) -> list[str]:
@@ -283,26 +316,99 @@ def show_chart(epochs: list[dict[str, float]], best: dict[str, float]) -> None:
     print(f"       epoch 1{' ' * (width - len(str(len(epochs))) - 7)}{len(epochs)}")
 
 
+def show_prediction_time(timings: list[Timing]) -> None:
+    device = f"GPU {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else "CPU"
+    heading(f"7. PREDICTION TIME ON THIS PC ({device})")
+    print("  total ms = prepare photo + model + build outline (the phone is usually slower)\n")
+    groups = list(dict.fromkeys(t.group for t in timings))
+    for group in groups:
+        print(f"  {group}:")
+        for t in timings:
+            if t.group == group:
+                print(f"    {t.total:6.1f} ms   (model {t.model:5.1f})   {t.photo}")
+
+    def mean(values: list[float]) -> float:
+        return sum(values) / len(values)
+
+    print(f"\n  {'average per group':<20}{'photos':>7}{'total ms':>10}{'model ms':>10}")
+    for group in groups:
+        items = [t for t in timings if t.group == group]
+        print(f"  {group:<20}{len(items):>7}{mean([t.total for t in items]):>10.1f}"
+              f"{mean([t.model for t in items]):>10.1f}")
+    total = mean([t.total for t in timings])
+    print(f"\n  Average over all {len(timings)} photos: {total:.1f} ms per photo "
+          f"(prepare {mean([t.prepare for t in timings]):.1f} + model {mean([t.model for t in timings]):.1f} "
+          f"+ outline {mean([t.outline for t in timings]):.1f}), about {1000 / total:.0f} photos per second")
+    print(f"  Fastest {min(t.total for t in timings):.1f} ms, slowest {max(t.total for t in timings):.1f} ms")
+    print(f"  Total for all {len(timings)} photos: {sum(t.total for t in timings) / 1000:.1f} s")
+
+
+def package_version(name: str) -> str:
+    """A Flutter package's version from pubspec.lock."""
+    lock = (PROJECT_DIR / "pubspec.lock").read_text(encoding="utf-8")
+    match = re.search(rf"\n  {name}:\n(?:    .*\n)*?    version: \"([^\"]+)\"", lock)
+    return match.group(1) if match else "?"
+
+
+def show_runtime(run_dir: Path, epochs: list[dict[str, float]], timings: list[Timing],
+                 part_times: dict[str, float]) -> None:
+    heading("8. RUNTIME")
+    training = epochs[-1]["time"]
+    print(f"  Training ................... {training / 60:.1f} min "
+          f"({len(epochs)} epochs, {training / len(epochs):.1f} s per epoch)")
+    print(f"  Predicting all {len(timings)} photos .. {sum(t.total for t in timings) / 1000:.1f} s")
+
+    print("\n  This analysis:")
+    for part, seconds in part_times.items():
+        print(f"    {part:<28}{seconds:>7.1f} s")
+    print(f"    {'total':<28}{sum(part_times.values()):>7.1f} s")
+
+    device = f"{torch.cuda.get_device_name(0)} (CUDA {torch.version.cuda})" if torch.cuda.is_available() else "CPU"
+    pt_file = run_dir / "weights" / "best.pt"
+    print("\n  Software running the model:")
+    print(f"    PC:    PyTorch {torch.__version__} on {device}, Ultralytics {ultralytics.__version__}, "
+          f"{pt_file.name} {pt_file.stat().st_size / 2**20:.1f} MB")
+    app_model = f"{APP_MODEL.name} {APP_MODEL.stat().st_size / 2**20:.1f} MB" if APP_MODEL.exists() else "no model"
+    print(f"    Phone: TensorFlow Lite via tflite_flutter {package_version('tflite_flutter')} "
+          f"on the phone's CPU (4 threads), {app_model}")
+
+
 def show_suggestions(advice: list[str]) -> None:
-    heading("7. SUGGESTIONS")
+    heading("9. SUGGESTIONS")
     if not advice:
         print("No problems found. Next: export this model for the app (yolo/export_tflite.py).")
     for item in advice:
         print(f"  - {item}")
 
 
+T = TypeVar("T")
+
+
 def analyze(run: str, previous: str | None = None) -> None:
+    part_times: dict[str, float] = {}
+
+    def timed(part: str, show: Callable[..., T], *args: object) -> T:
+        """Runs one part of the analysis and records how long it took."""
+        start = time.perf_counter()
+        result = show(*args)
+        part_times[part] = time.perf_counter() - start
+        return result
+
     run_dir = RUNS_DIR / run
+    start = time.perf_counter()
     epochs = load_epochs(run_dir)
     model = YOLO(run_dir / "weights" / "best.pt")
     previous = previous or previous_run(run)
+    part_times["loading the model"] = time.perf_counter() - start
 
-    best = show_best_epoch(epochs)
-    advice = show_training_length(epochs)
-    counts, card_scores, fake_scores, missed = show_mistakes(run_dir, model)
-    advice += show_cutoff(card_scores, fake_scores)
-    found = show_comparison(run, previous)
-    show_chart(epochs, best)
+    best = timed("1. best epoch", show_best_epoch, epochs)
+    advice = timed("2. training length", show_training_length, epochs)
+    counts, card_scores, fake_scores, missed, timings = timed("3. mistakes", show_mistakes, run_dir, model)
+    advice += timed("4. confidence cut-off", show_cutoff, card_scores, fake_scores)
+    found = timed("5. comparison", show_comparison, run, previous)
+    timed("6. chart", show_chart, epochs, best)
+    timed("7. prediction time", show_prediction_time, timings)
+    show_runtime(run_dir, epochs, timings, part_times)
 
     if counts["missed"]:
         advice.insert(0, f"Missed {counts['missed']} real card(s), e.g. {missed[0]}: add more training photos like them.")
